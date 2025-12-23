@@ -1,0 +1,64 @@
+name: Youtube Sentiment CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  train-and-deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install mlflow==2.9.0 scikit-learn==1.3.0 pandas==2.0.0 numpy==1.24.0 joblib==1.3.0 matplotlib
+    
+    - name: Run training script
+      working-directory: ./MLProject
+      run: |
+        python modelling.py
+      env:
+        MLFLOW_TRACKING_URI: file:../mlruns
+    
+    - name: Upload model artifacts
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: youtube-model-${{ github.run_number }}
+        path: |
+          mlruns/
+          MLProject/confusion_matrix.png
+
+    # --- BAGIAN DOCKER (ADVANCE - 4 POIN) ---
+    
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Create Dockerfile
+      run: |
+        cat > Dockerfile << 'EOF'
+        FROM python:3.9-slim
+        WORKDIR /app
+        RUN pip install mlflow scikit-learn pandas numpy
+        # Command sederhana untuk serve model (opsional)
+        CMD ["mlflow", "models", "serve", "-m", "model", "-h", "0.0.0.0", "-p", "8080", "--no-conda"]
+        EOF
+
+    - name: Build and Push Docker Image
+      run: |
+        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/youtube-sentiment-model"
+        docker build -t $IMAGE_NAME:latest .
+        docker push $IMAGE_NAME:latest
