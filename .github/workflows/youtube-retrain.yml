@@ -25,7 +25,6 @@ jobs:
     - name: Run training script
       working-directory: ./MLProject
       run: |
-        # Memastikan file ada sebelum dijalankan agar tidak EmptyDataError
         ls -lh youtube_comment_preprocessing/
         python modelling.py
       env:
@@ -37,3 +36,27 @@ jobs:
       with:
         name: youtube-model
         path: mlruns/
+
+    # --- BAGIAN DOCKER (WAJIB UNTUK POIN ADVANCE) ---
+    
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Create Dockerfile
+      run: |
+        cat > Dockerfile << 'EOF'
+        FROM python:3.9-slim
+        WORKDIR /app
+        RUN pip install mlflow scikit-learn pandas numpy
+        CMD ["mlflow", "models", "serve", "-m", "model", "-h", "0.0.0.0", "-p", "8080", "--no-conda"]
+        EOF
+
+    - name: Build and Push Docker Image
+      run: |
+        # Menggunakan username Anda: miranandachairunissa
+        IMAGE_NAME="miranandachairunissa/youtube-sentiment-model"
+        docker build -t $IMAGE_NAME:latest .
+        docker push $IMAGE_NAME:latest
