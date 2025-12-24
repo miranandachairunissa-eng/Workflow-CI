@@ -1,4 +1,4 @@
-name: MLflow CI/CD Pipeline with Docker
+name: MLflow CI/CD Pipeline with Docker (YouTube Comment Dataset)
 
 on:
   push:
@@ -11,11 +11,12 @@ jobs:
   train-and-deploy:
     runs-on: ubuntu-latest
 
-    # ✅ Dataset fix: pakai CSV youtube_comment_preprocessed.csv
+    # ✅ Semua dataset fix ke YouTube Comment
     env:
+      DATASET_DIR: MLProject/youtube_comment_preprocessing
       DATASET_FILE: youtube_comment_preprocessed.csv
-      DATASET_DIR: MLProject/spiderman_youtube_review_preprocessing
-      DATASET_TARGET: MLProject/spiderman_youtube_review_preprocessing/youtube_comment_preprocessed.csv
+      DATASET_PATH: MLProject/youtube_comment_preprocessing/youtube_comment_preprocessed.csv
+      EXPERIMENT_NAME: youtube_comment_classification
 
     steps:
     - name: Checkout repository
@@ -33,42 +34,57 @@ jobs:
         python -m pip install --upgrade pip
         pip install mlflow==2.9.0 scikit-learn==1.3.0 pandas==2.0.0 numpy==1.24.0 joblib==1.3.0
 
-    - name: Verify directory structure
+    - name: Verify directory structure & dataset
       run: |
         echo "=== Current directory ==="
         pwd
         ls -la
         echo ""
         echo "=== MLProject directory ==="
-        ls -la MLProject/ || (echo "❌ Folder MLProject/ tidak ada" && exit 1)
+        ls -la MLProject/ || (echo "❌ MLProject folder not found" && exit 1)
         echo ""
-        echo "=== Dataset directory ==="
-        ls -la "${DATASET_DIR}" || echo "Folder dataset belum ada (akan dibuat)."
+        echo "=== Dataset directory (YouTube Comment) ==="
+        ls -la "${DATASET_DIR}" || (echo "❌ Dataset folder not found: ${DATASET_DIR}" && exit 1)
         echo ""
-        echo "=== Dataset CSV (repo root) ==="
-        ls -la "${DATASET_FILE}" || (echo "❌ File dataset tidak ditemukan di root repo: ${DATASET_FILE}" && exit 1)
-
-    # ✅ FIX UTAMA: copy CSV ke folder yang dipakai project
-    - name: Put dataset CSV into MLProject folder
-      run: |
-        echo "📦 Copy dataset CSV -> ${DATASET_TARGET}"
-        mkdir -p "${DATASET_DIR}"
-        cp "${DATASET_FILE}" "${DATASET_TARGET}"
-
-        echo "✅ Dataset placed:"
-        ls -la "${DATASET_TARGET}"
-
+        echo "=== Dataset file (YouTube Comment) ==="
+        ls -la "${DATASET_PATH}" || (echo "❌ Dataset file not found: ${DATASET_PATH}" && exit 1)
         echo ""
-        echo "🔎 Preview dataset (5 baris pertama):"
-        head -n 5 "${DATASET_TARGET}" || true
+        echo "=== Dataset preview (first 5 lines) ==="
+        head -n 5 "${DATASET_PATH}" || true
 
-    # ✅ Training via MLflow Project
+    # ✅ Training via MLflow Project (mlflow run), dataset selalu youtube_comment_preprocessed.csv
     - name: Run training via MLflow Project
       run: |
         echo "🚀 Running training via MLflow Project..."
-        mlflow run ./MLProject -e main --env-manager=local --experiment-name Spiderman_Review_Classification
+        echo "Using dataset: ${DATASET_PATH}"
+
+        EXTRA_ARGS=""
+
+        # Kalau MLProject/MLproject punya parameter dataset, otomatis dipasang
+        if [ -f "MLProject/MLproject" ]; then
+          echo "🔎 Checking MLProject/MLproject params..."
+          cat MLProject/MLproject
+
+          if grep -qE '^\s*data_path\s*:' MLProject/MLproject; then
+            EXTRA_ARGS="-P data_path=${DATASET_PATH}"
+            echo "✅ Using param: data_path"
+          elif grep -qE '^\s*dataset_path\s*:' MLProject/MLproject; then
+            EXTRA_ARGS="-P dataset_path=${DATASET_PATH}"
+            echo "✅ Using param: dataset_path"
+          elif grep -qE '^\s*dataset\s*:' MLProject/MLproject; then
+            EXTRA_ARGS="-P dataset=${DATASET_PATH}"
+            echo "✅ Using param: dataset"
+          else
+            echo "⚠️ No dataset param found in MLproject. Will rely on code reading this dataset path."
+          fi
+        else
+          echo "⚠️ MLProject/MLproject not found. Ensure path is correct."
+        fi
+
+        mlflow run ./MLProject -e main --env-manager=local --experiment-name "${EXPERIMENT_NAME}" $EXTRA_ARGS
       env:
         MLFLOW_TRACKING_URI: file:${{ github.workspace }}/mlruns
+        DATASET_PATH: ${{ env.DATASET_PATH }}
 
     - name: Verify model output and MLflow structure
       run: |
@@ -184,7 +200,7 @@ jobs:
         CMD ["mlflow", "models", "serve", "-m", "./model", "-h", "0.0.0.0", "-p", "8080", "--no-conda"]
         EOF
 
-        echo "✅ Dockerfile created:"
+        echo "✅ Dockerfile created"
         cat Dockerfile
 
         sed -i "s|\$MODEL_PATH|$MODEL_PATH|g" Dockerfile
@@ -194,32 +210,38 @@ jobs:
 
     - name: Build Docker Image
       run: |
-        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/spiderman-review-model"
+        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/youtube-comment-model"
+
         echo "🐳 Building Docker image: $IMAGE_NAME:latest"
         docker build -t $IMAGE_NAME:latest .
+
         echo "✅ Docker image built successfully!"
-        docker images | grep spiderman-review-model
+        docker images | grep youtube-comment-model
 
     - name: Tag Docker Image
       run: |
-        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/spiderman-review-model"
+        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/youtube-comment-model"
+
         docker tag $IMAGE_NAME:latest $IMAGE_NAME:build-${{ github.run_number }}
         docker tag $IMAGE_NAME:latest $IMAGE_NAME:${GITHUB_SHA::7}
+
         echo "✅ Docker image tagged:"
-        docker images | grep spiderman-review-model
+        docker images | grep youtube-comment-model
 
     - name: Push Docker Image to Docker Hub
       run: |
-        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/spiderman-review-model"
+        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/youtube-comment-model"
+
         echo "🚀 Pushing Docker images to Docker Hub..."
         docker push $IMAGE_NAME:latest
         docker push $IMAGE_NAME:build-${{ github.run_number }}
         docker push $IMAGE_NAME:${GITHUB_SHA::7}
+
         echo "✅ All images pushed successfully!"
 
     - name: Create Docker Hub Info File
       run: |
-        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/spiderman-review-model"
+        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/youtube-comment-model"
 
         cat > docker-hub-info.txt << EOF
         ========================================
@@ -231,9 +253,6 @@ jobs:
         📦 Image Repository:
         https://hub.docker.com/r/$IMAGE_NAME
 
-        🔗 Direct Link:
-        https://hub.docker.com/repository/docker/$IMAGE_NAME/general
-
         🏷️  Available Tags:
         - latest
         - build-${{ github.run_number }}
@@ -244,9 +263,6 @@ jobs:
 
         🚀 Run Command:
         docker run -p 8080:8080 $IMAGE_NAME:latest
-
-        🔗 Test Endpoint:
-        curl http://localhost:8080/ping
 
         ========================================
         Build Information:
@@ -272,6 +288,9 @@ jobs:
       run: |
         echo "## 🎉 CI/CD Pipeline Completed Successfully!" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### ✅ Dataset Used:" >> $GITHUB_STEP_SUMMARY
+        echo "- ${{ env.DATASET_PATH }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
         echo "### ✅ Artifacts Created:" >> $GITHUB_STEP_SUMMARY
         echo "- 📦 Trained Model (GitHub Artifacts)" >> $GITHUB_STEP_SUMMARY
         echo "- 🐳 Docker Image (Docker Hub)" >> $GITHUB_STEP_SUMMARY
@@ -281,11 +300,4 @@ jobs:
         echo "- Run ID: ${{ steps.find_run.outputs.run_id }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🐳 Docker Hub:" >> $GITHUB_STEP_SUMMARY
-        echo "**Repository:** https://hub.docker.com/r/${{ secrets.DOCKER_USERNAME }}/spiderman-review-model" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Direct Link:** https://hub.docker.com/repository/docker/${{ secrets.DOCKER_USERNAME }}/spiderman-review-model/general" >> $GITHUB_STEP_SUMMARY
-        echo "" >> $GITHUB_STEP_SUMMARY
-        echo "### 📥 Pull Command:" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-        echo "docker pull ${{ secrets.DOCKER_USERNAME }}/spiderman-review-model:latest" >> $GITHUB_STEP_SUMMARY
-        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+        echo "**Repository:** https://hub.docker.com/r/${{ secrets.DOCKER_USERNAME }}/youtube-comment-model" >> $GITHUB_STEP_SUMMARY
