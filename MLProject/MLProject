@@ -1,4 +1,4 @@
-name: Youtube_Sentiment_Classifier
+name: youtube_comment_classification
 
 conda_env: conda.yaml
 
