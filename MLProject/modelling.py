@@ -12,34 +12,21 @@ from sklearn.metrics import accuracy_score
 
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
-from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import FunctionTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 
 
 def resolve_dataset_path(p: str) -> str:
-    """
-    MLflow menjalankan modelling.py dari folder MLProject/.
-    Dataset di repo ada di: MLProject/youtube_comment_preprocessing/youtube_comment_preprocessed.csv
-
-    Jadi path yang BENAR saat runtime (dari dalam MLProject/) adalah:
-      youtube_comment_preprocessing/youtube_comment_preprocessed.csv
-
-    Fungsi ini meng-handle:
-    - user kasih path relatif project
-    - user salah kasih prefix 'MLProject/...'
-    - user kasih path relatif dari root repo
-    """
     project_dir = Path(__file__).resolve().parent  # .../MLProject
     raw = Path(p)
 
-    # kandidat path yang akan dicoba
     candidates = [
-        raw,  # apa adanya
-        project_dir / raw,  # relatif dari folder MLProject/
-        project_dir / str(p).replace("MLProject/", ""),  # strip prefix MLProject/ kalau ada
-        project_dir.parent / raw,  # relatif dari root repo
-        project_dir.parent / str(p).replace("MLProject/", ""),  # root repo + strip prefix
+        raw,
+        project_dir / raw,
+        project_dir / str(p).replace("MLProject/", ""),
+        project_dir.parent / raw,
+        project_dir.parent / str(p).replace("MLProject/", ""),
     ]
 
     for c in candidates:
@@ -54,7 +41,6 @@ def resolve_dataset_path(p: str) -> str:
 
 
 def pick_text_column(df: pd.DataFrame) -> str:
-    # Prefer clean_review, lalu text, lalu kolom object pertama
     if "clean_review" in df.columns:
         return "clean_review"
     if "text" in df.columns:
@@ -66,7 +52,6 @@ def pick_text_column(df: pd.DataFrame) -> str:
 
 
 def pick_target_column(df: pd.DataFrame) -> str:
-    # Prefer sentiment_label, lalu sentiment, lalu fallback umum
     if "sentiment_label" in df.columns:
         return "sentiment_label"
     if "sentiment" in df.columns:
@@ -74,8 +59,17 @@ def pick_target_column(df: pd.DataFrame) -> str:
     for c in ["target", "label", "class", "y", "output"]:
         if c in df.columns:
             return c
-    # terakhir: pakai kolom terakhir
     return df.columns[-1]
+
+
+def reshape_to_2d(x):
+    """
+    Fungsi TOP-LEVEL (bukan lambda) agar pipeline bisa dipickle.
+    x akan berupa pandas Series / numpy array.
+    """
+    import numpy as np
+    arr = np.asarray(x)
+    return arr.reshape(-1, 1)
 
 
 def main():
@@ -94,12 +88,11 @@ def main():
     print("MLflow Training Pipeline Started (YouTube Comment Dataset)")
     print("=" * 60)
 
-    # ✅ Experiment name sesuai MLproject kamu
     mlflow.set_experiment("youtube_comment_classification")
 
     with mlflow.start_run():
         # [1] Load dataset
-        print("\n[1/6] Loading dataset...")
+        print("\n[1/7] Loading dataset...")
         dataset_path = resolve_dataset_path(args.data_path)
         df = pd.read_csv(dataset_path)
 
@@ -110,7 +103,7 @@ def main():
         print(df.head())
 
         # [2] Identify columns
-        print("\n[2/6] Identifying target & feature columns...")
+        print("\n[2/7] Identifying target & feature columns...")
         target_col = pick_target_column(df)
         text_col = pick_text_column(df)
         use_text_length = "text_length" in df.columns
@@ -120,7 +113,7 @@ def main():
         print(f"✓ Use length    : {use_text_length}")
 
         # [3] Prepare data
-        print("\n[3/6] Preparing data...")
+        print("\n[3/7] Preparing data...")
         y = df[target_col]
 
         feature_cols = [text_col] + (["text_length"] if use_text_length else [])
@@ -146,17 +139,16 @@ def main():
         print(f"✓ Train set: {X_train.shape}")
         print(f"✓ Test set : {X_test.shape}")
 
-        # [4] Build pipeline (TF-IDF + optional numeric)
-        print("\n[4/6] Building model pipeline...")
+        # [4] Build pipeline
+        print("\n[4/7] Building model pipeline...")
 
         transformers = [
             ("tfidf", TfidfVectorizer(max_features=5000, ngram_range=(1, 2)), text_col),
         ]
 
         if use_text_length:
-            # Convert series -> 2D array
             transformers.append(
-                ("len", FunctionTransformer(lambda s: s.values.reshape(-1, 1), validate=False), "text_length")
+                ("len", FunctionTransformer(reshape_to_2d, validate=False), "text_length")
             )
 
         preprocessor = ColumnTransformer(transformers=transformers, remainder="drop")
@@ -169,12 +161,12 @@ def main():
         )
 
         # [5] Train
-        print("\n[5/6] Training model...")
+        print("\n[5/7] Training model...")
         clf.fit(X_train, y_train)
         print("✓ Model trained successfully")
 
         # [6] Evaluate
-        print("\n[6/6] Evaluating model...")
+        print("\n[6/7] Evaluating model...")
         y_pred = clf.predict(X_test)
         acc = accuracy_score(y_test, y_pred)
         train_acc = clf.score(X_train, y_train)
