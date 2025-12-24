@@ -13,7 +13,6 @@ jobs:
 
     # ✅ Semua dataset fix ke YouTube Comment
     env:
-      DATASET_DIR: MLProject/youtube_comment_preprocessing
       DATASET_FILE: youtube_comment_preprocessed.csv
       DATASET_PATH: MLProject/youtube_comment_preprocessing/youtube_comment_preprocessed.csv
       EXPERIMENT_NAME: youtube_comment_classification
