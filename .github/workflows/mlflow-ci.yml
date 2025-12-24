@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # ✅ Dataset YouTube Comment
+      # ✅ Dataset YouTube Comment (sesuai yang kamu kirim)
       DATASET_DIR: MLProject/youtube_comment_preprocessing
       DATASET_FILE: youtube_comment_preprocessed.csv
       DATASET_PATH_REPO: MLProject/youtube_comment_preprocessing/youtube_comment_preprocessed.csv
@@ -20,11 +20,10 @@ jobs:
       # ✅ Saat mlflow run ./MLProject, working dir = MLProject/
       DATASET_PATH_PROJECT: youtube_comment_preprocessing/youtube_comment_preprocessed.csv
 
-      # ✅ Experiment
       EXPERIMENT_NAME: youtube_comment_classification
 
-      # ✅ Docker Hub repo yang kamu mau (kaitkan ke sini)
-      DOCKER_REPO: youtube_comment_preprocessed
+      # ✅ Ganti nama image biar sesuai project
+      IMAGE_NAME: youtube-comment-model
 
     steps:
     - name: Checkout repository
@@ -92,7 +91,7 @@ jobs:
         retention-days: 30
 
     # ==========================================
-    # DOCKER BUILD & PUSH (ADVANCE: mlflow build-docker)
+    # DOCKER BUILD & PUSH
     # ==========================================
 
     - name: Set up Docker Buildx
@@ -110,6 +109,7 @@ jobs:
         echo "🔍 Searching for latest MLflow run..."
 
         FOUND=false
+        MODEL_PATH=""
         EXPERIMENT_ID=""
         RUN_ID=""
 
@@ -129,8 +129,18 @@ jobs:
 
             if [ -d "$run_dir/artifacts/model" ]; then
               echo "✅ Found model in: $run_dir"
+
+              MODEL_PATH="$run_dir/artifacts/model"
               EXPERIMENT_ID="$exp_name"
               RUN_ID="$run_name"
+
+              echo "📦 Model Path: $MODEL_PATH"
+              echo "📊 Experiment ID: $EXPERIMENT_ID"
+              echo "🔑 Run ID: $RUN_ID"
+
+              echo "📋 Model files:"
+              ls -la "$MODEL_PATH"
+
               FOUND=true
               break 2
             fi
@@ -144,65 +154,77 @@ jobs:
 
         echo "experiment_id=$EXPERIMENT_ID" >> $GITHUB_OUTPUT
         echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+        echo "model_path=$MODEL_PATH" >> $GITHUB_OUTPUT
 
         echo "✅ MLflow run detection completed!"
-        echo "Experiment ID: $EXPERIMENT_ID"
-        echo "Run ID: $RUN_ID"
 
-    # ✅ ADVANCE: Build image pakai mlflow models build-docker
-    - name: Build Docker image with MLflow build-docker (Advance)
+    - name: Create Dockerfile for MLflow Model
       run: |
-        set -e
+        MODEL_PATH="${{ steps.find_run.outputs.model_path }}"
 
-        echo "🐳 Docker info (before fix):"
-        docker version || true
-        docker info || true
+        cat > Dockerfile << 'EOF'
+        FROM python:3.9-slim
 
-        # Fix error "http+docker" (reset env docker)
-        unset DOCKER_HOST DOCKER_TLS_VERIFY DOCKER_CERT_PATH DOCKER_CONTEXT
-        export DOCKER_HOST="unix:///var/run/docker.sock"
+        WORKDIR /app
 
-        echo "🐳 Docker info (after fix):"
-        docker version
-        docker info
+        COPY $MODEL_PATH ./model
 
-        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}"
-        RUN_ID="${{ steps.find_run.outputs.run_id }}"
+        RUN pip install --no-cache-dir mlflow scikit-learn pandas numpy scipy joblib
 
-        echo "🐳 Building docker image using MLflow..."
-        echo "Model URI: runs:/${RUN_ID}/model"
-        echo "Image    : ${IMAGE_NAME}:latest"
+        RUN if [ -f ./model/requirements.txt ]; then \
+              pip install --no-cache-dir -r ./model/requirements.txt; \
+            fi
 
-        mlflow models build-docker \
-          --model-uri "runs:/${RUN_ID}/model" \
-          --name "${IMAGE_NAME}:latest"
-      env:
-        MLFLOW_TRACKING_URI: file:${{ github.workspace }}/mlruns
+        EXPOSE 8080
+
+        ENV MLFLOW_TRACKING_URI=""
+        ENV DISABLE_NGINX=true
+
+        CMD ["mlflow", "models", "serve", "-m", "./model", "-h", "0.0.0.0", "-p", "8080", "--no-conda"]
+        EOF
+
+        echo "✅ Dockerfile created"
+        cat Dockerfile
+
+        sed -i "s|\$MODEL_PATH|$MODEL_PATH|g" Dockerfile
+
+        echo "✅ Dockerfile with model path:"
+        cat Dockerfile
+
+    - name: Build Docker Image
+      run: |
+        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}"
+
+        echo "🐳 Building Docker image: $IMAGE_NAME:latest"
+        docker build -t $IMAGE_NAME:latest .
+
+        echo "✅ Docker image built successfully!"
+        docker images | grep "${{ env.IMAGE_NAME }}" || true
 
     - name: Tag Docker Image
       run: |
-        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}"
+        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}"
 
-        docker tag ${IMAGE_NAME}:latest ${IMAGE_NAME}:build-${{ github.run_number }}
-        docker tag ${IMAGE_NAME}:latest ${IMAGE_NAME}:${GITHUB_SHA::7}
+        docker tag $IMAGE_NAME:latest $IMAGE_NAME:build-${{ github.run_number }}
+        docker tag $IMAGE_NAME:latest $IMAGE_NAME:${GITHUB_SHA::7}
 
         echo "✅ Docker image tagged:"
-        docker images | grep "${{ env.DOCKER_REPO }}" || true
+        docker images | grep "${{ env.IMAGE_NAME }}" || true
 
     - name: Push Docker Image to Docker Hub
       run: |
-        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}"
+        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}"
 
         echo "🚀 Pushing Docker images to Docker Hub..."
-        docker push ${IMAGE_NAME}:latest
-        docker push ${IMAGE_NAME}:build-${{ github.run_number }}
-        docker push ${IMAGE_NAME}:${GITHUB_SHA::7}
+        docker push $IMAGE_NAME:latest
+        docker push $IMAGE_NAME:build-${{ github.run_number }}
+        docker push $IMAGE_NAME:${GITHUB_SHA::7}
 
         echo "✅ All images pushed successfully!"
 
     - name: Create Docker Hub Info File
       run: |
-        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}"
+        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}"
 
         cat > docker-hub-info.txt << EOF
         ========================================
@@ -241,7 +263,8 @@ jobs:
         - MLflow Run ID: ${{ steps.find_run.outputs.run_id }}
         ========================================
 
-        Note: This Docker image was built using 'mlflow models build-docker' command.
+        Note: This Docker image was built manually from MLflow model artifacts.
+        The model is served using 'mlflow models serve' command.
         EOF
 
         cat docker-hub-info.txt
@@ -262,16 +285,16 @@ jobs:
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### ✅ Artifacts Created:" >> $GITHUB_STEP_SUMMARY
         echo "- 📦 Trained Model (GitHub Artifacts)" >> $GITHUB_STEP_SUMMARY
-        echo "- 🐳 Docker Image (Docker Hub via mlflow build-docker)" >> $GITHUB_STEP_SUMMARY
+        echo "- 🐳 Docker Image (Docker Hub)" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 📊 MLflow Info:" >> $GITHUB_STEP_SUMMARY
         echo "- Experiment ID: ${{ steps.find_run.outputs.experiment_id }}" >> $GITHUB_STEP_SUMMARY
         echo "- Run ID: ${{ steps.find_run.outputs.run_id }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 🐳 Docker Hub:" >> $GITHUB_STEP_SUMMARY
-        echo "**Repository:** https://hub.docker.com/repository/docker/${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Repository:** https://hub.docker.com/r/${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "### 📥 Pull Command:" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
-        echo "docker pull ${{ secrets.DOCKER_USERNAME }}/${{ env.DOCKER_REPO }}:latest" >> $GITHUB_STEP_SUMMARY
+        echo "docker pull ${{ secrets.DOCKER_USERNAME }}/${{ env.IMAGE_NAME }}:latest" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
