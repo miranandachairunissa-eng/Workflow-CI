@@ -1,0 +1,291 @@
+name: MLflow CI/CD Pipeline with Docker
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  train-and-deploy:
+    runs-on: ubuntu-latest
+
+    # ✅ Dataset fix: pakai CSV youtube_comment_preprocessed.csv
+    env:
+      DATASET_FILE: youtube_comment_preprocessed.csv
+      DATASET_DIR: MLProject/spiderman_youtube_review_preprocessing
+      DATASET_TARGET: MLProject/spiderman_youtube_review_preprocessing/youtube_comment_preprocessed.csv
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y tree
+        python -m pip install --upgrade pip
+        pip install mlflow==2.9.0 scikit-learn==1.3.0 pandas==2.0.0 numpy==1.24.0 joblib==1.3.0
+
+    - name: Verify directory structure
+      run: |
+        echo "=== Current directory ==="
+        pwd
+        ls -la
+        echo ""
+        echo "=== MLProject directory ==="
+        ls -la MLProject/ || (echo "❌ Folder MLProject/ tidak ada" && exit 1)
+        echo ""
+        echo "=== Dataset directory ==="
+        ls -la "${DATASET_DIR}" || echo "Folder dataset belum ada (akan dibuat)."
+        echo ""
+        echo "=== Dataset CSV (repo root) ==="
+        ls -la "${DATASET_FILE}" || (echo "❌ File dataset tidak ditemukan di root repo: ${DATASET_FILE}" && exit 1)
+
+    # ✅ FIX UTAMA: copy CSV ke folder yang dipakai project
+    - name: Put dataset CSV into MLProject folder
+      run: |
+        echo "📦 Copy dataset CSV -> ${DATASET_TARGET}"
+        mkdir -p "${DATASET_DIR}"
+        cp "${DATASET_FILE}" "${DATASET_TARGET}"
+
+        echo "✅ Dataset placed:"
+        ls -la "${DATASET_TARGET}"
+
+        echo ""
+        echo "🔎 Preview dataset (5 baris pertama):"
+        head -n 5 "${DATASET_TARGET}" || true
+
+    # ✅ Training via MLflow Project
+    - name: Run training via MLflow Project
+      run: |
+        echo "🚀 Running training via MLflow Project..."
+        mlflow run ./MLProject -e main --env-manager=local --experiment-name Spiderman_Review_Classification
+      env:
+        MLFLOW_TRACKING_URI: file:${{ github.workspace }}/mlruns
+
+    - name: Verify model output and MLflow structure
+      run: |
+        echo "=== Models directory ==="
+        ls -la MLProject/models/ || echo "No models yet"
+        echo ""
+        echo "=== MLruns root directory ==="
+        ls -la mlruns/ || echo "No mlruns yet"
+        echo ""
+        echo "=== MLruns detailed structure ==="
+        tree mlruns/ -L 3 || find mlruns/ -maxdepth 3 -type d
+
+    - name: Upload model artifacts to GitHub
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: trained-model-${{ github.run_number }}
+        path: |
+          MLProject/models/
+          mlruns/
+        retention-days: 30
+
+    # ==========================================
+    # DOCKER BUILD & PUSH
+    # ==========================================
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Find latest MLflow run
+      id: find_run
+      run: |
+        echo "🔍 Searching for latest MLflow run..."
+
+        FOUND=false
+        MODEL_PATH=""
+        EXPERIMENT_ID=""
+        RUN_ID=""
+
+        for exp_dir in mlruns/*/; do
+          exp_dir=${exp_dir%/}
+          exp_name=$(basename "$exp_dir")
+
+          echo "📁 Checking experiment directory: $exp_dir"
+
+          for run_dir in "$exp_dir"/*/ ; do
+            run_dir=${run_dir%/}
+            run_name=$(basename "$run_dir")
+
+            if [ "$run_name" = "meta.yaml" ] || [ "$run_name" = ".trash" ]; then
+              continue
+            fi
+
+            if [ -d "$run_dir/artifacts/model" ]; then
+              echo "✅ Found model in: $run_dir"
+
+              MODEL_PATH="$run_dir/artifacts/model"
+              EXPERIMENT_ID="$exp_name"
+              RUN_ID="$run_name"
+
+              echo "📦 Model Path: $MODEL_PATH"
+              echo "📊 Experiment ID: $EXPERIMENT_ID"
+              echo "🔑 Run ID: $RUN_ID"
+
+              echo "📋 Model files:"
+              ls -la "$MODEL_PATH"
+
+              FOUND=true
+              break 2
+            fi
+          done
+        done
+
+        if [ "$FOUND" = false ]; then
+          echo "❌ No valid MLflow run with model artifacts found!"
+          exit 1
+        fi
+
+        echo "experiment_id=$EXPERIMENT_ID" >> $GITHUB_OUTPUT
+        echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+        echo "model_path=$MODEL_PATH" >> $GITHUB_OUTPUT
+
+        echo "✅ MLflow run detection completed!"
+
+    - name: Create Dockerfile for MLflow Model
+      run: |
+        MODEL_PATH="${{ steps.find_run.outputs.model_path }}"
+
+        cat > Dockerfile << 'EOF'
+        FROM python:3.9-slim
+
+        WORKDIR /app
+
+        COPY $MODEL_PATH ./model
+
+        RUN pip install --no-cache-dir mlflow scikit-learn pandas numpy
+
+        RUN if [ -f ./model/requirements.txt ]; then \
+              pip install --no-cache-dir -r ./model/requirements.txt; \
+            fi
+
+        EXPOSE 8080
+
+        ENV MLFLOW_TRACKING_URI=""
+        ENV DISABLE_NGINX=true
+
+        CMD ["mlflow", "models", "serve", "-m", "./model", "-h", "0.0.0.0", "-p", "8080", "--no-conda"]
+        EOF
+
+        echo "✅ Dockerfile created:"
+        cat Dockerfile
+
+        sed -i "s|\$MODEL_PATH|$MODEL_PATH|g" Dockerfile
+
+        echo "✅ Dockerfile with model path:"
+        cat Dockerfile
+
+    - name: Build Docker Image
+      run: |
+        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/spiderman-review-model"
+        echo "🐳 Building Docker image: $IMAGE_NAME:latest"
+        docker build -t $IMAGE_NAME:latest .
+        echo "✅ Docker image built successfully!"
+        docker images | grep spiderman-review-model
+
+    - name: Tag Docker Image
+      run: |
+        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/spiderman-review-model"
+        docker tag $IMAGE_NAME:latest $IMAGE_NAME:build-${{ github.run_number }}
+        docker tag $IMAGE_NAME:latest $IMAGE_NAME:${GITHUB_SHA::7}
+        echo "✅ Docker image tagged:"
+        docker images | grep spiderman-review-model
+
+    - name: Push Docker Image to Docker Hub
+      run: |
+        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/spiderman-review-model"
+        echo "🚀 Pushing Docker images to Docker Hub..."
+        docker push $IMAGE_NAME:latest
+        docker push $IMAGE_NAME:build-${{ github.run_number }}
+        docker push $IMAGE_NAME:${GITHUB_SHA::7}
+        echo "✅ All images pushed successfully!"
+
+    - name: Create Docker Hub Info File
+      run: |
+        IMAGE_NAME="${{ secrets.DOCKER_USERNAME }}/spiderman-review-model"
+
+        cat > docker-hub-info.txt << EOF
+        ========================================
+        🐳 DOCKER HUB DEPLOYMENT INFORMATION
+        ========================================
+
+        ✅ Docker Image Successfully Pushed!
+
+        📦 Image Repository:
+        https://hub.docker.com/r/$IMAGE_NAME
+
+        🔗 Direct Link:
+        https://hub.docker.com/repository/docker/$IMAGE_NAME/general
+
+        🏷️  Available Tags:
+        - latest
+        - build-${{ github.run_number }}
+        - ${GITHUB_SHA::7}
+
+        📥 Pull Command:
+        docker pull $IMAGE_NAME:latest
+
+        🚀 Run Command:
+        docker run -p 8080:8080 $IMAGE_NAME:latest
+
+        🔗 Test Endpoint:
+        curl http://localhost:8080/ping
+
+        ========================================
+        Build Information:
+        - GitHub Run: ${{ github.run_number }}
+        - Commit: ${GITHUB_SHA::7}
+        - Branch: ${{ github.ref_name }}
+        - Timestamp: $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+        - MLflow Experiment ID: ${{ steps.find_run.outputs.experiment_id }}
+        - MLflow Run ID: ${{ steps.find_run.outputs.run_id }}
+        ========================================
+        EOF
+
+        cat docker-hub-info.txt
+
+    - name: Upload Docker Hub Info
+      uses: actions/upload-artifact@v4
+      with:
+        name: docker-hub-info-${{ github.run_number }}
+        path: docker-hub-info.txt
+        retention-days: 90
+
+    - name: Summary
+      run: |
+        echo "## 🎉 CI/CD Pipeline Completed Successfully!" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### ✅ Artifacts Created:" >> $GITHUB_STEP_SUMMARY
+        echo "- 📦 Trained Model (GitHub Artifacts)" >> $GITHUB_STEP_SUMMARY
+        echo "- 🐳 Docker Image (Docker Hub)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📊 MLflow Info:" >> $GITHUB_STEP_SUMMARY
+        echo "- Experiment ID: ${{ steps.find_run.outputs.experiment_id }}" >> $GITHUB_STEP_SUMMARY
+        echo "- Run ID: ${{ steps.find_run.outputs.run_id }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 🐳 Docker Hub:" >> $GITHUB_STEP_SUMMARY
+        echo "**Repository:** https://hub.docker.com/r/${{ secrets.DOCKER_USERNAME }}/spiderman-review-model" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Direct Link:** https://hub.docker.com/repository/docker/${{ secrets.DOCKER_USERNAME }}/spiderman-review-model/general" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### 📥 Pull Command:" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+        echo "docker pull ${{ secrets.DOCKER_USERNAME }}/spiderman-review-model:latest" >> $GITHUB_STEP_SUMMARY
+        echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
