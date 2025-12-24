@@ -23,7 +23,7 @@ jobs:
       EXPERIMENT_NAME: youtube_comment_classification
 
       # ✅ Ganti nama image biar sesuai project
-      IMAGE_NAME: youtube-comment-model
+      IMAGE_NAME: youtube_comment_preprocessed
 
     steps:
     - name: Checkout repository
