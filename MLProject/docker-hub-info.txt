@@ -1,2 +1,2 @@
-Tautan Docker Hub: https://hub.docker.com/r/miranandachairunissa/youtube-sentiment-model
+https://hub.docker.com/repository/docker/miranandachairunissa/youtube_comment_preprocessed
 Note: Docker image build and pushed automatically via GitHub Actions.
